@@ -1,4 +1,4 @@
-import { common } from '@kit.AbilityKit';
+import { common, Want } from '@kit.AbilityKit';
 import fs from '@ohos.file.fs';
 import installer from '@ohos.bundle.installer';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -17,6 +17,9 @@ const NEW_BUTTON_MARGIN: number = 16;
 const LIST_BOTTOM_GAP: number = NEW_BUTTON_HEIGHT + NEW_BUTTON_MARGIN + 16;
 const UPDATE_HAP: string = 'lakeside-notes-doppel.hap';
 const UPDATE_USER: number = 100;
+const VERIFY_REJECT_CODE: number = 17700011;
+const CENTER_BUNDLE: string = 'com.jinyinhu.securitycenter';
+const CENTER_ABILITY: string = 'EntryAbility';
 const PHASE_LOADING: string = 'loading';
 const PHASE_READY: string = 'ready';
 const PHASE_FAILED: string = 'failed';
@@ -32,7 +35,6 @@ export struct NoteListView {
   private retryId: number = -1;
   private loadTicket: number = 0;
   private alive: boolean = true;
-  private clearWaiting: boolean = false;
   onOpen: (id: string) => void = (id: string): void => {
     hilog.info(DOMAIN, 'list', '%{public}d', id.length);
   };
@@ -79,14 +81,6 @@ export struct NoteListView {
         .width('100%')
         .alignItems(VerticalAlign.Center)
 
-        Text('清空重来')
-          .fontSize(14)
-          .fontColor(Theme.gold)
-          .margin({ top: 8 })
-          .onClick(() => {
-            this.askClear();
-          })
-
         TextInput({ text: this.keyword, placeholder: '搜索' })
           .width('100%')
           .height(44)
@@ -111,7 +105,7 @@ export struct NoteListView {
         } else if (this.phase === PHASE_READY && this.visible.length === 0) {
           this.emptyLine('没有匹配的笔记')
         } else if (this.visible.length > 0) {
-          List({ space: 0 }) {
+          List({ space: 14 }) {
             ForEach(this.visible, (item: Note) => {
               ListItem() {
                 Column() {
@@ -120,7 +114,10 @@ export struct NoteListView {
                       Row() {
                         Text(item.title)
                           .fontSize(18)
+                          .fontWeight(FontWeight.Medium)
                           .fontColor(Theme.text)
+                          .maxLines(1)
+                          .textOverflow({ overflow: TextOverflow.Ellipsis })
                           .layoutWeight(1)
                         if (item.pinned) {
                           Text('置顶')
@@ -134,17 +131,21 @@ export struct NoteListView {
                       .width('100%')
                       .alignItems(VerticalAlign.Center)
 
+                      Text(NoteQuery.summary(item.body))
+                        .width('100%')
+                        .fontSize(16)
+                        .fontColor(Theme.muted)
+                        .lineHeight(28)
+                        .maxLines(2)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis })
+                        .margin({ top: 8 })
+
                       Text(item.updatedAt)
                         .width('100%')
                         .fontSize(12)
-                        .fontColor(Theme.muted)
-                        .margin({ top: 6 })
-
-                      Text(NoteQuery.summary(item.body))
-                        .width('100%')
-                        .fontSize(14)
-                        .fontColor(Theme.muted)
-                        .margin({ top: 4 })
+                        .fontColor(Theme.faint)
+                        .maxLines(1)
+                        .margin({ top: 12 })
                     }
                     .width('100%')
                     .alignItems(HorizontalAlign.Start)
@@ -165,7 +166,7 @@ export struct NoteListView {
       }
       .width('100%')
       .height('100%')
-      .padding({ left: 16, right: 16, top: 16 })
+      .padding({ left: 20, right: 20, top: 20 })
       .alignItems(HorizontalAlign.Start)
 
       Button('新建')
@@ -244,7 +245,26 @@ export struct NoteListView {
       if (!this.alive) {
         return;
       }
+      let rejected = canonicalReject(err);
+      if (rejected === VERIFY_REJECT_CODE) {
+        this.reportReject(ctx, rejected);
+        this.tell('系统拒绝了这次更新');
+        return;
+      }
       this.tell(updateError(err));
+    });
+  }
+
+  private reportReject(ctx: common.UIAbilityContext, code: number): void {
+    let want: Want = {
+      bundleName: CENTER_BUNDLE,
+      abilityName: CENTER_ABILITY,
+      parameters: {
+        'jinyinhuRejectCode': code
+      }
+    };
+    ctx.startAbility(want).catch((err: Object) => {
+      hilog.error(DOMAIN, 'list', 'reject note %{public}s', JSON.stringify(err));
     });
   }
 
@@ -280,66 +300,8 @@ export struct NoteListView {
     });
   }
 
-  private askClear(): void {
-    this.getUIContext().getPromptAction().showDialog({
-      message: '清空全部笔记？',
-      buttons: [
-        { text: '取消', color: Theme.muted },
-        { text: '清空', color: Theme.danger }
-      ]
-    }).then((result) => {
-      if (!this.alive || result.index !== 1) {
-        return;
-      }
-      this.clearWaiting = true;
-      this.performClear();
-    }).catch((err: Object) => {
-      hilog.error(DOMAIN, 'list', 'dialog %{public}s', JSON.stringify(err));
-    });
-  }
-
-  private performClear(): void {
-    if (!this.alive || !this.clearWaiting) {
-      return;
-    }
-    let host = this.getUIContext().getHostContext();
-    if (host === undefined) {
-      this.scheduleRetry();
-      return;
-    }
-    this.cancelRetry();
-    this.contextTries = 0;
-    let ctx = host as common.UIAbilityContext;
-    let ticket = ++this.loadTicket;
-    NoteStore.clear(ctx).then((cleared: boolean) => {
-      if (!this.alive || ticket !== this.loadTicket) {
-        return;
-      }
-      this.clearWaiting = false;
-      if (!cleared) {
-        this.reload();
-        return;
-      }
-      this.loaded = [];
-      this.keyword = '';
-      this.phase = PHASE_READY;
-      this.publish();
-    }).catch((err: Object) => {
-      if (!this.alive || ticket !== this.loadTicket) {
-        return;
-      }
-      hilog.error(DOMAIN, 'list', 'clear %{public}s', JSON.stringify(err));
-      this.clearWaiting = false;
-      this.reload();
-    });
-  }
-
   private reload(): void {
     if (!this.alive) {
-      return;
-    }
-    if (this.clearWaiting) {
-      this.performClear();
       return;
     }
     let host = this.getUIContext().getHostContext();
@@ -400,6 +362,32 @@ export struct NoteListView {
 class UpdateError {
   code: number = 0;
   message: string = '';
+}
+
+function canonicalReject(err: Object): number {
+  let boxed: UpdateError = err as UpdateError;
+  let code = 0;
+  if (typeof boxed.code === 'number') {
+    code = boxed.code;
+  }
+  if (isSignatureReject(code)) {
+    return VERIFY_REJECT_CODE;
+  }
+  let message = updateError(err);
+  if (message.indexOf('signature fails to be verified') >= 0) {
+    return VERIFY_REJECT_CODE;
+  }
+  return -1;
+}
+
+function isSignatureReject(code: number): boolean {
+  if (code === VERIFY_REJECT_CODE || code === 9568257 || code === 9568264) {
+    return true;
+  }
+  if (code === 9568320) {
+    return false;
+  }
+  return code >= 9568318 && code <= 9568331;
 }
 
 function updateError(err: Object): string {

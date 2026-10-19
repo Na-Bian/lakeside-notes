@@ -65,10 +65,10 @@ export struct CardFrame {
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .padding(14)
-    .borderRadius(14)
+    .padding(16)
+    .borderRadius(20)
     .backgroundColor(Theme.card)
-    .border({ width: 1, color: Theme.line })
-    .margin({ bottom: 10 })
+    .shadow({ radius: 24, color: '#0A141619', offsetY: 6 })
+    .margin({ bottom: 14 })
   }
 }

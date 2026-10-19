@@ -199,7 +199,7 @@ export struct NoteEditView {
         }
       }
       .width('100%')
-      .padding(16)
+      .padding(20)
       .alignItems(HorizontalAlign.Start)
     }
     .width('100%')

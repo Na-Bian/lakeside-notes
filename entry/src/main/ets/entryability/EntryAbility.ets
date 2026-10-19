@@ -18,7 +18,7 @@ export default class EntryAbility extends UIAbility {
     hilog.info(DOMAIN, TAG, 'onCreate %{public}s/%{public}s', bundleName,
       launchParam.launchReason.toString());
     try {
-      this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+      this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT);
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'colorMode %{public}s', JSON.stringify(err));
     }

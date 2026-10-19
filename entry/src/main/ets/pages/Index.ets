@@ -69,7 +69,8 @@ struct Index {
             .textAlign(TextAlign.Center)
             .layoutWeight(1)
             .height(Theme.hitHeight)
-            .borderRadius(10)
+            .borderRadius(12)
+            .maxLines(1)
             .backgroundColor(this.tab === index ? Theme.gold : Theme.cardAlt)
             .onClick(() => {
               this.pickTab(index);
