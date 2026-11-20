@@ -8,7 +8,6 @@ import { NoteQuery } from '../model/NoteQuery';
 import { NoteStore } from '../model/NoteStore';
 
 const DOMAIN: number = 0x4C4E;
-const RELATIVE_PATH: string = 'files/lakeside-notes.json';
 const PHASE_LOADING: string = 'loading';
 const PHASE_READY: string = 'ready';
 const PHASE_FAILED: string = 'failed';
@@ -58,7 +57,7 @@ export struct SelfCheckView {
               .fontSize(16)
               .fontColor(Theme.text)
               .margin({ top: 2, bottom: 10 })
-            InfoLine({ label: '存放路径', value: RELATIVE_PATH })
+            InfoLine({ label: '存放路径', value: NoteStore.storeLabel() })
             Text('最近更新')
               .width('100%')
               .fontSize(12)

@@ -1,4 +1,4 @@
-import { common } from '@kit.AbilityKit';
+import { common, contextConstant } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -7,6 +7,7 @@ import { Note, localIso, newNoteId, parseNoteList } from './NoteTypes';
 const DOMAIN: number = 0x4C4E;
 const TAG: string = 'NoteStore';
 const FILE_NAME: string = 'lakeside-notes.json';
+const STORE_LABEL: string = 'el5/files/lakeside-notes.json';
 const PREF_NAME: string = 'lakeside-notes';
 const SEEDED_KEY: string = 'seeded';
 
@@ -17,9 +18,21 @@ class SeedFlag {
 
 export class NoteStore {
   private static chain: Promise<void> = Promise.resolve();
+  private static movedToEl5: boolean = false;
+  private static el5Root: string = '';
+  private static el2Root: string = '';
+
+  static storeLabel(): string {
+    return STORE_LABEL;
+  }
 
   static readCurrent(ctx: common.UIAbilityContext): Note[] {
-    return NoteStore.parseFile(NoteStore.notePath(ctx));
+    try {
+      return NoteStore.parseFile(NoteStore.notePath(ctx));
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'read current %{public}s', JSON.stringify(err));
+      return [];
+    }
   }
 
   static load(ctx: common.UIAbilityContext): Promise<Note[]> {
@@ -30,8 +43,13 @@ export class NoteStore {
 
   static save(ctx: common.UIAbilityContext, notes: Note[]): Promise<boolean> {
     return NoteStore.enqueue(() => {
-      let written = NoteStore.replaceFile(NoteStore.notePath(ctx), JSON.stringify(notes));
-      return Promise.resolve(written);
+      try {
+        let written = NoteStore.replaceFile(NoteStore.notePath(ctx), JSON.stringify(notes));
+        return Promise.resolve(written);
+      } catch (err) {
+        hilog.error(DOMAIN, TAG, 'save path %{public}s', JSON.stringify(err));
+        return Promise.resolve(false);
+      }
     });
   }
 
@@ -188,7 +206,55 @@ export class NoteStore {
   }
 
   private static notePath(ctx: common.UIAbilityContext): string {
-    return ctx.filesDir + '/' + FILE_NAME;
+    NoteStore.moveEl2ToEl5(ctx);
+    return NoteStore.areaFile(ctx, contextConstant.AreaMode.EL5);
+  }
+
+  private static areaFile(ctx: common.UIAbilityContext, area: contextConstant.AreaMode): string {
+    return NoteStore.areaRoot(ctx, area) + '/' + FILE_NAME;
+  }
+
+  private static areaRoot(ctx: common.UIAbilityContext, area: contextConstant.AreaMode): string {
+    if (area === contextConstant.AreaMode.EL5 && NoteStore.el5Root.length > 0) {
+      return NoteStore.el5Root;
+    }
+    if (area === contextConstant.AreaMode.EL2 && NoteStore.el2Root.length > 0) {
+      return NoteStore.el2Root;
+    }
+    let root = ctx.createAreaModeContext(area).filesDir;
+    if (area === contextConstant.AreaMode.EL5) {
+      NoteStore.el5Root = root;
+    } else if (area === contextConstant.AreaMode.EL2) {
+      NoteStore.el2Root = root;
+    }
+    return root;
+  }
+
+  private static moveEl2ToEl5(ctx: common.UIAbilityContext): void {
+    if (NoteStore.movedToEl5) {
+      return;
+    }
+    let el5 = NoteStore.areaFile(ctx, contextConstant.AreaMode.EL5);
+    let el2 = NoteStore.areaFile(ctx, contextConstant.AreaMode.EL2);
+    if (!NoteStore.exists(el5) && NoteStore.exists(el2)) {
+      let text = '';
+      try {
+        text = fileIo.readTextSync(el2);
+      } catch (err) {
+        hilog.error(DOMAIN, TAG, 'el5 copy %{public}s', JSON.stringify(err));
+        return;
+      }
+      if (!NoteStore.replaceFile(el5, text)) {
+        hilog.error(DOMAIN, TAG, 'el5 copy write failed');
+        return;
+      }
+    }
+    if (NoteStore.exists(el5)) {
+      NoteStore.removeIfPresent(el2);
+      NoteStore.removeIfPresent(el2 + '.tmp');
+      NoteStore.removeIfPresent(el2 + '.bak');
+    }
+    NoteStore.movedToEl5 = true;
   }
 
   private static replaceFile(path: string, text: string): boolean {
@@ -242,7 +308,7 @@ export class NoteStore {
       return true;
     } catch (openErr) {
       NoteStore.removeIfPresent(path);
-      hilog.error(DOMAIN, TAG, 'open %{public}s', JSON.stringify(openErr));
+      hilog.error(DOMAIN, TAG, 'open %{public}s path %{public}s', JSON.stringify(openErr), path);
       return false;
     }
   }
