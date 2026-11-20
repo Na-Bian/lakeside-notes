@@ -1,4 +1,4 @@
-import { common, contextConstant } from '@kit.AbilityKit';
+import { common, contextConstant, screenLockFileManager } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { fileIo } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -10,10 +10,18 @@ const FILE_NAME: string = 'lakeside-notes.json';
 const STORE_LABEL: string = 'el5/files/lakeside-notes.json';
 const PREF_NAME: string = 'lakeside-notes';
 const SEEDED_KEY: string = 'seeded';
+const FILE_ABSENT: number = 0;
+const FILE_PRESENT: number = 1;
+const FILE_UNREADABLE: number = 2;
+const ENOENT: number = 13900002;
 
 class SeedFlag {
   known: boolean = false;
   seeded: boolean = false;
+}
+
+class FileError {
+  code: number = 0;
 }
 
 export class NoteStore {
@@ -21,6 +29,7 @@ export class NoteStore {
   private static movedToEl5: boolean = false;
   private static el5Root: string = '';
   private static el2Root: string = '';
+  private static keyQueryLogged: boolean = false;
 
   static storeLabel(): string {
     return STORE_LABEL;
@@ -98,14 +107,19 @@ export class NoteStore {
   private static async seedBody(ctx: common.UIAbilityContext): Promise<void> {
     let flag = await NoteStore.readSeededFlag(ctx);
     let path = NoteStore.notePath(ctx);
+    let state = NoteStore.fileState(path);
+    if (state === FILE_UNREADABLE) {
+      hilog.error(DOMAIN, TAG, 'seed skipped, store unreadable');
+      return;
+    }
     if (flag.known && flag.seeded) {
       return;
     }
-    if (!flag.known && NoteStore.exists(path)) {
+    if (!flag.known && state === FILE_PRESENT) {
       hilog.error(DOMAIN, TAG, 'seed flag unreadable, keep existing file');
       return;
     }
-    let hadFile = NoteStore.exists(path);
+    let hadFile = state === FILE_PRESENT;
     let written = NoteStore.replaceFile(path, JSON.stringify(NoteStore.seedNotes()));
     if (!written) {
       hilog.error(DOMAIN, TAG, 'seed write failed');
@@ -164,7 +178,12 @@ export class NoteStore {
   }
 
   private static parseFile(path: string): Note[] {
-    if (!NoteStore.exists(path)) {
+    let state = NoteStore.fileState(path);
+    if (state === FILE_UNREADABLE) {
+      hilog.error(DOMAIN, TAG, 'read skipped, store unreadable');
+      return [];
+    }
+    if (state === FILE_ABSENT) {
       return [];
     }
     let text = '';
@@ -236,7 +255,13 @@ export class NoteStore {
     }
     let el5 = NoteStore.areaFile(ctx, contextConstant.AreaMode.EL5);
     let el2 = NoteStore.areaFile(ctx, contextConstant.AreaMode.EL2);
-    if (!NoteStore.exists(el5) && NoteStore.exists(el2)) {
+    let el5State = NoteStore.fileState(el5);
+    let el2State = NoteStore.fileState(el2);
+    if (el5State === FILE_UNREADABLE || el2State === FILE_UNREADABLE) {
+      hilog.error(DOMAIN, TAG, 'el5 migrate skipped, store unreadable');
+      return;
+    }
+    if (el5State === FILE_ABSENT && el2State === FILE_PRESENT) {
       let text = '';
       try {
         text = fileIo.readTextSync(el2);
@@ -248,8 +273,9 @@ export class NoteStore {
         hilog.error(DOMAIN, TAG, 'el5 copy write failed');
         return;
       }
+      el5State = FILE_PRESENT;
     }
-    if (NoteStore.exists(el5)) {
+    if (el5State === FILE_PRESENT) {
       NoteStore.removeIfPresent(el2);
       NoteStore.removeIfPresent(el2 + '.tmp');
       NoteStore.removeIfPresent(el2 + '.bak');
@@ -258,6 +284,10 @@ export class NoteStore {
   }
 
   private static replaceFile(path: string, text: string): boolean {
+    if (NoteStore.fileState(path) === FILE_UNREADABLE) {
+      hilog.error(DOMAIN, TAG, 'save skipped, store unreadable');
+      return false;
+    }
     let temp = path + '.tmp';
     let backup = path + '.bak';
     let moved = false;
@@ -266,7 +296,13 @@ export class NoteStore {
         NoteStore.removeIfPresent(temp);
         return false;
       }
-      if (NoteStore.exists(path)) {
+      let state = NoteStore.fileState(path);
+      if (state === FILE_UNREADABLE) {
+        NoteStore.removeIfPresent(temp);
+        hilog.error(DOMAIN, TAG, 'save skipped, store unreadable');
+        return false;
+      }
+      if (state === FILE_PRESENT) {
         fileIo.renameSync(path, backup);
         moved = true;
       }
@@ -277,7 +313,7 @@ export class NoteStore {
       return true;
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'save %{public}s', JSON.stringify(err));
-      if (moved && !NoteStore.exists(path) && NoteStore.exists(backup)) {
+      if (moved && NoteStore.fileState(path) !== FILE_PRESENT && NoteStore.fileState(backup) === FILE_PRESENT) {
         try {
           fileIo.renameSync(backup, path);
         } catch (restoreErr) {
@@ -325,7 +361,12 @@ export class NoteStore {
 
   private static clearFiles(ctx: common.UIAbilityContext): boolean {
     let path = NoteStore.notePath(ctx);
-    if (NoteStore.exists(path)) {
+    let state = NoteStore.fileState(path);
+    if (state === FILE_UNREADABLE) {
+      hilog.error(DOMAIN, TAG, 'clear skipped, store unreadable');
+      return false;
+    }
+    if (state === FILE_PRESENT) {
       try {
         fileIo.unlinkSync(path);
       } catch (err) {
@@ -339,7 +380,7 @@ export class NoteStore {
   }
 
   private static removeIfPresent(path: string): void {
-    if (!NoteStore.exists(path)) {
+    if (NoteStore.fileState(path) === FILE_ABSENT) {
       return;
     }
     try {
@@ -349,11 +390,65 @@ export class NoteStore {
     }
   }
 
-  private static exists(path: string): boolean {
+  private static fileState(path: string): number {
+    if (NoteStore.isEl5Path(path) && NoteStore.keyReleased()) {
+      return FILE_UNREADABLE;
+    }
     try {
-      return fileIo.accessSync(path);
+      if (fileIo.accessSync(path)) {
+        return FILE_PRESENT;
+      }
     } catch (err) {
+      if (!NoteStore.isEnoent(err)) {
+        hilog.error(DOMAIN, TAG, 'access %{public}s path %{public}s', JSON.stringify(err), path);
+        return FILE_UNREADABLE;
+      }
+    }
+    return NoteStore.confirmAbsent(path);
+  }
+
+  private static confirmAbsent(path: string): number {
+    let slash = path.lastIndexOf('/');
+    if (slash <= 0) {
+      return FILE_ABSENT;
+    }
+    let parent = path.substring(0, slash);
+    let name = path.substring(slash + 1);
+    try {
+      let names: string[] = fileIo.listFileSync(parent);
+      for (let i = 0; i < names.length; i++) {
+        if (names[i] === name) {
+          return FILE_PRESENT;
+        }
+      }
+      return FILE_ABSENT;
+    } catch (err) {
+      if (NoteStore.isEnoent(err)) {
+        return FILE_ABSENT;
+      }
+      hilog.error(DOMAIN, TAG, 'list %{public}s path %{public}s', JSON.stringify(err), parent);
+      return FILE_UNREADABLE;
+    }
+  }
+
+  private static isEl5Path(path: string): boolean {
+    return path.indexOf('/el5/') >= 0;
+  }
+
+  private static keyReleased(): boolean {
+    try {
+      return screenLockFileManager.queryAppKeyState() === screenLockFileManager.KeyStatus.KEY_RELEASED;
+    } catch (err) {
+      if (!NoteStore.keyQueryLogged) {
+        NoteStore.keyQueryLogged = true;
+        hilog.error(DOMAIN, TAG, 'key state %{public}s', JSON.stringify(err));
+      }
       return false;
     }
+  }
+
+  private static isEnoent(err: Object): boolean {
+    let boxed: FileError = err as FileError;
+    return typeof boxed.code === 'number' && boxed.code === ENOENT;
   }
 }
